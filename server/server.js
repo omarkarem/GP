@@ -5,8 +5,6 @@ const passport = require('passport');
 const session = require('express-session');
 const path = require('path');
 const fs = require('fs');
-const http = require('http');
-const socketIo = require('socket.io');
 require('dotenv').config();
 
 // Set default environment for development
@@ -76,14 +74,6 @@ if (fs.existsSync(uploadsPath)) {
 require('./config/passport');
 
 const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: ['https://cyclofit.grity.co', 'http://localhost:3000'],
-    methods: ['GET', 'POST'],
-    credentials: true
-  }
-});
 
 // CORS - Put this FIRST before ANY other middleware
 app.use(cors({
@@ -122,15 +112,8 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/contact', require('./routes/contact'));
 app.use('/api/newsletter', require('./routes/newsletter'));
 app.use('/api/analysis', require('./routes/analysis'));
-
-// WebSocket connection handling
-io.on('connection', (socket) => {
-  console.log('New client connected');
-  
-  socket.on('disconnect', () => {
-    console.log('Client disconnected');
-  });
-});
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/admin-setup', require('./routes/adminSetup')); // TEMPORARY - Remove after admin creation
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
@@ -147,8 +130,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Change app.listen to server.listen
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 }); 
