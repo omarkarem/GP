@@ -37,7 +37,7 @@ const sendEmail = async (to, subject, html) => {
     }
     
     const info = await transporter.sendMail({
-      from: process.env.SMTP_USER || 'noreply@cyclofit.com',
+      from: `"CycloFit" <${process.env.SMTP_USER || 'noreply@cyclofit.com'}>`,
       to,
       subject,
       html
@@ -129,12 +129,15 @@ exports.register = async (req, res) => {
     // Send verification email
     const verificationUrl = `${process.env.CLIENT_URL}/verify-email?token=${verificationToken}`;
     console.log('Verification URL:', verificationUrl);
+    console.log('CLIENT_URL env var:', process.env.CLIENT_URL);
+    console.log('SMTP_USER env var:', process.env.SMTP_USER);
     
     const emailTemplate = `
       <h1>Welcome to CycloFit!</h1>
       <p>Please verify your email by clicking the link below:</p>
       <a href="${verificationUrl}" style="display: inline-block; background-color: #4a90e2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
       <p>This link will expire in 24 hours.</p>
+      <p><strong>📧 Important:</strong> If you don't see this email in your inbox, please check your spam/junk folder. Sometimes verification emails end up there!</p>
       <p>If the button doesn't work, copy and paste this URL into your browser:</p>
       <p>${verificationUrl}</p>
     `;
@@ -423,6 +426,7 @@ exports.resendVerification = async (req, res) => {
       <p>Please verify your email by clicking the link below:</p>
       <a href="${verificationUrl}" style="display: inline-block; background-color: #4a90e2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Verify Email</a>
       <p>This link will expire in 24 hours.</p>
+      <p><strong>📧 Important:</strong> If you don't see this email in your inbox, please check your spam/junk folder. Sometimes verification emails end up there!</p>
       <p>If the button doesn't work, copy and paste this URL into your browser:</p>
       <p>${verificationUrl}</p>
     `;

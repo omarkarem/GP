@@ -3,6 +3,9 @@ const Analysis = require('../models/Analysis');
 const Contact = require('../models/Contact');
 const Newsletter = require('../models/Newsletter');
 const mongoose = require('mongoose');
+const { getSignedUrl, uploadToS3, deleteFromS3 } = require('../config/s3');
+const path = require('path');
+const fs = require('fs');
 
 // Dashboard Analytics
 exports.getDashboardStats = async (req, res) => {
@@ -86,7 +89,7 @@ exports.getDashboardStats = async (req, res) => {
     const mostActiveUsers = await Analysis.aggregate([
       {
         $group: {
-          _id: "$userId",
+          _id: "$user",
           analysisCount: { $sum: 1 },
           lastAnalysis: { $max: "$createdAt" }
         }
@@ -195,7 +198,7 @@ exports.getAllUsers = async (req, res) => {
     // Get analysis count for each user
     const usersWithAnalysisCount = await Promise.all(
       users.map(async (user) => {
-        const analysisCount = await Analysis.countDocuments({ userId: user._id });
+        const analysisCount = await Analysis.countDocuments({ user: user._id });
         return {
           ...user.toObject(),
           analysisCount
@@ -246,6 +249,22 @@ exports.toggleUserStatus = async (req, res) => {
       });
     }
 
+    // Prevent users from deactivating themselves
+    if (userId === req.user._id.toString()) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You cannot deactivate your own account' 
+      });
+    }
+
+    // Regular admins can only toggle user and admin accounts, not super admins
+    if (req.user.role === 'admin' && user.role === 'super_admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only super admins can modify super admin accounts' 
+      });
+    }
+
     user.isActive = !user.isActive;
     await user.save();
 
@@ -288,11 +307,37 @@ exports.updateUserRole = async (req, res) => {
       });
     }
 
+    // Check permissions based on the requesting user's role
+    const requestingUserRole = req.user.role;
+
     // Only super admins can create other super admins
-    if (role === 'super_admin' && req.user.role !== 'super_admin') {
+    if (role === 'super_admin' && requestingUserRole !== 'super_admin') {
       return res.status(403).json({ 
         success: false, 
-        message: 'Only super admins can create other super admins' 
+        message: 'Only super admins can assign super admin roles' 
+      });
+    }
+
+    // Regular admins cannot modify super admin users
+    if (user.role === 'super_admin' && requestingUserRole !== 'super_admin') {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Only super admins can modify super admin accounts' 
+      });
+    }
+
+    // Regular admins can only modify users and other regular admins
+    if (requestingUserRole === 'admin' && 
+        !['user', 'admin'].includes(user.role) && 
+        role !== 'super_admin') {
+      // This allows admins to update user/admin roles but not create super admins
+    }
+
+    // Prevent users from changing their own role
+    if (userId === req.user._id.toString()) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You cannot change your own role' 
       });
     }
 
@@ -309,10 +354,10 @@ exports.updateUserRole = async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating user role:', error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: 'Failed to update user role',
-      error: error.message 
+      error: error.message
     });
   }
 };
@@ -344,14 +389,55 @@ exports.getAllAnalyses = async (req, res) => {
 
     const skip = (page - 1) * limit;
 
+    // Build aggregation pipeline
+    const pipeline = [
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user',
+          foreignField: '_id',
+          as: 'userId'
+        }
+      },
+      {
+        $unwind: '$userId'
+      }
+    ];
+
+    // Add search filter if provided
+    if (search) {
+      pipeline.push({
+        $match: {
+          $or: [
+            { 'userId.name.firstName': { $regex: search, $options: 'i' } },
+            { 'userId.name.lastName': { $regex: search, $options: 'i' } },
+            { 'userId.email': { $regex: search, $options: 'i' } }
+          ]
+        }
+      });
+    }
+
+    // Add other filters
+    if (Object.keys(filter).length > 0) {
+      pipeline.push({ $match: filter });
+    }
+
+    // Add sorting, pagination
+    pipeline.push(
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit }
+    );
+
     const [analyses, totalAnalyses] = await Promise.all([
-      Analysis.find(filter)
-        .populate('userId', 'name email')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit),
-      Analysis.countDocuments(filter)
+      Analysis.aggregate(pipeline),
+      Analysis.aggregate([
+        ...pipeline.slice(0, -3), // Remove sort, skip, limit for count
+        { $count: 'total' }
+      ])
     ]);
+
+    const totalCount = totalAnalyses.length > 0 ? totalAnalyses[0].total : 0;
 
     res.json({
       success: true,
@@ -359,8 +445,8 @@ exports.getAllAnalyses = async (req, res) => {
         analyses,
         pagination: {
           currentPage: page,
-          totalPages: Math.ceil(totalAnalyses / limit),
-          totalAnalyses,
+          totalPages: Math.ceil(totalCount / limit),
+          totalAnalyses: totalCount,
           limit
         }
       }
@@ -404,16 +490,259 @@ exports.deleteAnalysis = async (req, res) => {
   }
 };
 
+// Get Analysis by ID (Admin)
+exports.getAnalysisById = async (req, res) => {
+  try {
+    const { analysisId } = req.params;
+    
+    const analysis = await Analysis.findById(analysisId).populate('user', 'name email');
+    if (!analysis) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Analysis not found' 
+      });
+    }
+
+    // Transform for client (add some helpful flags)
+    const analysisData = analysis.toObject();
+    
+    // Use the model's storageType if available, otherwise determine from files
+    if (!analysisData.storageType || analysisData.storageType === 'local') {
+      analysisData.storageType = 
+        (analysis.processedVideo && analysis.processedVideo.s3Key) ? 's3' : 
+        (analysis.processedVideo && analysis.processedVideo.filePath) ? 'local' :
+        (analysis.originalVideo && analysis.originalVideo.s3Key) ? 's3' : 
+        (analysis.originalVideo && analysis.originalVideo.filePath) ? 'local' : 
+        analysisData.storageType || 'unknown';
+    }
+    
+    // Ensure duration is properly set - try multiple sources
+    if (!analysisData.duration || analysisData.duration === null) {
+      if (analysis.originalVideo && analysis.originalVideo.duration) {
+        analysisData.duration = analysis.originalVideo.duration;
+      } else if (analysis.processedVideo && analysis.processedVideo.duration) {
+        analysisData.duration = analysis.processedVideo.duration;
+      }
+    }
+    
+    console.log('Analysis duration:', analysisData.duration, 'Storage type:', analysisData.storageType);
+    console.log('Original video duration:', analysis.originalVideo?.duration);
+    console.log('Processed video duration:', analysis.processedVideo?.duration);
+    
+    // Check for video availability using both fields
+    analysisData.processed_video_available = !!analysis.processedVideo?.s3Key || !!analysis.processedVideo?.filePath;
+    
+    // Always include keyframe information
+    analysisData.keyframes_available = Array.isArray(analysis.keyframes) && analysis.keyframes.length > 0;
+    analysisData.keyframe_count = Array.isArray(analysis.keyframes) ? analysis.keyframes.length : 0;
+
+    res.json({
+      success: true,
+      data: {
+        analysis: analysisData
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching analysis:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch analysis',
+      error: error.message 
+    });
+  }
+};
+
+// Get Processed Video (Admin)
+exports.getProcessedVideo = async (req, res) => {
+  try {
+    const { analysisId } = req.params;
+    
+    const analysis = await Analysis.findById(analysisId);
+    if (!analysis) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Analysis not found' 
+      });
+    }
+
+    const videoData = analysis.processedVideo;
+    if (!videoData) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Processed video not found' 
+      });
+    }
+
+    let videoUrl;
+    
+    // Handle old format (filePath) vs new format (s3Key)
+    if (videoData.s3Key) {
+      // New format - generate S3 signed URL
+      console.log(`Using S3 storage for processed video:`, videoData.s3Key);
+      videoUrl = await getSignedUrl(videoData.s3Key, 3600); // 1 hour expiry
+    } else if (videoData.filePath) {
+      // Legacy format - return a local URL
+      console.log(`Using local storage for processed video:`, videoData.filePath);
+      videoUrl = `${process.env.SERVER_URL || 'http://localhost:4000'}/static/${videoData.filePath.replace(/\\/g, '/')}`;
+    } else {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No valid video storage location found' 
+      });
+    }
+
+    res.json({ url: videoUrl });
+  } catch (error) {
+    console.error('Error getting processed video:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get processed video',
+      error: error.message 
+    });
+  }
+};
+
+// Get Original Video (Admin)
+exports.getOriginalVideo = async (req, res) => {
+  try {
+    const { analysisId } = req.params;
+    
+    const analysis = await Analysis.findById(analysisId);
+    if (!analysis) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Analysis not found' 
+      });
+    }
+
+    const videoData = analysis.originalVideo;
+    if (!videoData) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Original video not found' 
+      });
+    }
+
+    let videoUrl;
+    
+    // Handle old format (filePath) vs new format (s3Key)
+    if (videoData.s3Key) {
+      // New format - generate S3 signed URL
+      console.log(`Using S3 storage for original video:`, videoData.s3Key);
+      videoUrl = await getSignedUrl(videoData.s3Key, 3600); // 1 hour expiry
+    } else if (videoData.filePath) {
+      // Legacy format - return a local URL
+      console.log(`Using local storage for original video:`, videoData.filePath);
+      videoUrl = `${process.env.SERVER_URL || 'http://localhost:4000'}/static/${videoData.filePath.replace(/\\/g, '/')}`;
+    } else {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No valid video storage location found' 
+      });
+    }
+
+    res.json({ url: videoUrl });
+  } catch (error) {
+    console.error('Error getting original video:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get original video',
+      error: error.message 
+    });
+  }
+};
+
+// Get Keyframes (Admin)
+exports.getKeyframes = async (req, res) => {
+  try {
+    const { analysisId } = req.params;
+    
+    const analysis = await Analysis.findById(analysisId);
+    if (!analysis) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Analysis not found' 
+      });
+    }
+
+    if (!analysis.keyframes || analysis.keyframes.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'No keyframes available' 
+      });
+    }
+
+    // Generate signed URLs for all keyframes
+    const keyframeUrls = await Promise.all(
+      analysis.keyframes.map(async (keyframe, index) => {
+        let url;
+        
+        // Handle old format (filePath) vs new format (s3Key)
+        if (keyframe.s3Key) {
+          // New format - generate S3 signed URL
+          console.log(`Using S3 storage for keyframe ${index}:`, keyframe.s3Key);
+          url = await getSignedUrl(keyframe.s3Key, 3600); // 1 hour expiry
+        } else if (keyframe.filePath) {
+          // Legacy format - return a local URL
+          console.log(`Using local storage for keyframe ${index}:`, keyframe.filePath);
+          url = `${process.env.SERVER_URL || 'http://localhost:4000'}/static/${keyframe.filePath.replace(/\\/g, '/')}`;
+        } else {
+          return null; // Skip invalid keyframes
+        }
+        
+        return {
+          url,
+          timestamp: keyframe.timestamp || 0
+        };
+      })
+    );
+
+    // Filter out null keyframes
+    const validKeyframes = keyframeUrls.filter(kf => kf !== null);
+
+    res.json({ keyframes: validKeyframes });
+  } catch (error) {
+    console.error('Error getting keyframes:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to get keyframes',
+      error: error.message 
+    });
+  }
+};
+
 // Contact Form Management
 exports.getAllContacts = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
+    const search = req.query.search || '';
     const status = req.query.status || '';
+    const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
 
+    // Build filter object
     const filter = {};
+    
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { subject: { $regex: search, $options: 'i' } },
+        { message: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
     if (status) {
       filter.status = status;
+    }
+    
+    if (startDate && endDate) {
+      filter.createdAt = { $gte: startDate, $lte: endDate };
+    } else if (startDate) {
+      filter.createdAt = { $gte: startDate };
+    } else if (endDate) {
+      filter.createdAt = { $lte: endDate };
     }
 
     const skip = (page - 1) * limit;
@@ -454,7 +783,7 @@ exports.updateContactStatus = async (req, res) => {
     const { contactId } = req.params;
     const { status } = req.body;
 
-    if (!['pending', 'in_progress', 'resolved'].includes(status)) {
+    if (!['new', 'read', 'replied', 'closed'].includes(status)) {
       return res.status(400).json({ 
         success: false, 
         message: 'Invalid status specified' 
@@ -470,7 +799,6 @@ exports.updateContactStatus = async (req, res) => {
     }
 
     contact.status = status;
-    contact.updatedAt = new Date();
     await contact.save();
 
     res.json({

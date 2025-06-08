@@ -18,6 +18,8 @@ const AdminContacts = () => {
   });
   const [pagination, setPagination] = useState({});
   const [updatingStatus, setUpdatingStatus] = useState({});
+  const [selectedMessage, setSelectedMessage] = useState(null);
+  const [showMessageModal, setShowMessageModal] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -102,6 +104,16 @@ const AdminContacts = () => {
     }
   };
 
+  const openMessageModal = (contact) => {
+    setSelectedMessage(contact);
+    setShowMessageModal(true);
+  };
+
+  const closeMessageModal = () => {
+    setSelectedMessage(null);
+    setShowMessageModal(false);
+  };
+
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('en-US', {
       year: 'numeric',
@@ -115,8 +127,8 @@ const AdminContacts = () => {
   const getStatusBadgeColor = (status) => {
     switch(status) {
       case 'new': return 'bg-blue-100 text-blue-800 border-blue-200';
-      case 'in_progress': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-      case 'resolved': return 'bg-green-100 text-green-800 border-green-200';
+      case 'read': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'replied': return 'bg-green-100 text-green-800 border-green-200';
       case 'closed': return 'bg-gray-100 text-gray-800 border-gray-200';
       default: return 'bg-blue-100 text-blue-800 border-blue-200';
     }
@@ -165,7 +177,7 @@ const AdminContacts = () => {
                 type="text"
                 value={filters.search}
                 onChange={(e) => handleFilterChange('search', e.target.value)}
-                placeholder="Search by name or email..."
+                placeholder="Search by name, email, subject..."
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500"
               />
             </div>
@@ -179,8 +191,8 @@ const AdminContacts = () => {
               >
                 <option value="">All Status</option>
                 <option value="new">New</option>
-                <option value="in_progress">In Progress</option>
-                <option value="resolved">Resolved</option>
+                <option value="read">Read</option>
+                <option value="replied">Replied</option>
                 <option value="closed">Closed</option>
               </select>
             </div>
@@ -250,6 +262,7 @@ const AdminContacts = () => {
                   </th>
                 </tr>
               </thead>
+              
               <tbody className="bg-white divide-y divide-gray-200">
                 {contacts.map((contact) => (
                   <tr key={contact._id} className="hover:bg-gray-50">
@@ -276,6 +289,7 @@ const AdminContacts = () => {
                         {contact.message}
                       </div>
                     </td>
+                    
                     <td className="px-6 py-4 whitespace-nowrap">
                       <select
                         value={contact.status}
@@ -286,8 +300,8 @@ const AdminContacts = () => {
                         }`}
                       >
                         <option value="new">New</option>
-                        <option value="in_progress">In Progress</option>
-                        <option value="resolved">Resolved</option>
+                        <option value="read">Read</option>
+                        <option value="replied">Replied</option>
                         <option value="closed">Closed</option>
                       </select>
                     </td>
@@ -301,7 +315,7 @@ const AdminContacts = () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <button
-                        onClick={() => alert(`Full Message:\n\n${contact.message}`)}
+                        onClick={() => openMessageModal(contact)}
                         className="text-blue-600 hover:text-blue-900 text-sm font-medium"
                       >
                         View Full
@@ -312,8 +326,86 @@ const AdminContacts = () => {
               </tbody>
             </table>
           </div>
+
+          {/* Pagination */}
+          {pagination.totalPages > 1 && (
+            <div className="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+              <div className="flex-1 flex justify-between items-center">
+                <div>
+                  <p className="text-sm text-gray-700">
+                    Showing <span className="font-medium">{((pagination.currentPage - 1) * pagination.limit) + 1}</span> to{' '}
+                    <span className="font-medium">
+                      {Math.min(pagination.currentPage * pagination.limit, pagination.totalContacts)}
+                    </span> of{' '}
+                    <span className="font-medium">{pagination.totalContacts}</span> results
+                  </p>
+                </div>
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => handlePageChange(pagination.currentPage - 1)}
+                    disabled={pagination.currentPage === 1}
+                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => handlePageChange(pagination.currentPage + 1)}
+                    disabled={pagination.currentPage === pagination.totalPages}
+                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </main>
+
+      {/* Message Modal */}
+      {showMessageModal && selectedMessage && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={closeMessageModal}>
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[80vh] overflow-hidden shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="p-6">
+              <div className="flex justify-between items-start mb-4">
+                <h2 className="text-xl font-semibold text-gray-800">Message from {selectedMessage.name}</h2>
+                <button
+                  onClick={closeMessageModal}
+                  className="text-gray-500 hover:text-gray-700 text-2xl leading-none"
+                >
+                  ×
+                </button>
+              </div>
+              
+              <div className="space-y-3 mb-4">
+                <div className="flex gap-4 text-sm text-gray-600">
+                  <span><strong>Email:</strong> {selectedMessage.email}</span>
+                  <span><strong>Date:</strong> {formatDate(selectedMessage.createdAt)}</span>
+                </div>
+                <div className="text-sm text-gray-600">
+                  <strong>Subject:</strong> {selectedMessage.subject}
+                </div>
+              </div>
+              
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Message:</h3>
+                <div className="text-gray-900 whitespace-pre-wrap leading-relaxed">
+                  {selectedMessage.message}
+                </div>
+              </div>
+              
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={closeMessageModal}
+                  className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
